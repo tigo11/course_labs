@@ -11,11 +11,20 @@ services:
     networks:
       - app_net
     command: python app.py
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   client:
     build: ./client
     depends_on:
-      - server
+      server:
+        condition: service_healthy
     networks:
       - app_net
     command: python client.py
+    restart: on-failure

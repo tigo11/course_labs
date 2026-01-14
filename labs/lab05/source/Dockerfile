@@ -1,14 +1,20 @@
 FROM python:3.11-slim AS builder
-WORKDIR /hello
+#Рабочая директория внутри контейнера
+WORKDIR /app
+# Копируем файл зависимостей
 COPY requirements.txt .
+# Обновляем pip и собираем wheel-пакеты зависимостей
 RUN pip install --upgrade pip && pip wheel --wheel-dir=/wheels -r requirements.txt
 
 FROM python:3.11-slim 
-WORKDIR /hello
+WORKDIR /app
+# Копируем заранее собранные wheel-пакеты
 COPY --from=builder /wheels /wheels 
 COPY requirements.txt .
 RUN pip install --no-index --find-links=/wheels -r requirements.txt
-COPY hello.py .
-
+# Копируем исходный код приложения
+COPY app.py .
+# Нужно для логирования в Docker
 ENV PYTHONUNBUFFERED=1
-CMD ["python", "hello.py"]
+# Команда запуска контейнера
+CMD ["python", "app.py"]

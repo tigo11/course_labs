@@ -5,13 +5,16 @@ from flask import (
     render_template_string,
     redirect,
     url_for,
+    abort,
 )
 import sqlite3
 import os
+from markupsafe import escape
 
 app = Flask(__name__)
 
 DB_PATH = os.environ.get("APP_DB_PATH", "app.db")
+FILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "files")
 
 
 def init_db():
@@ -21,7 +24,7 @@ def init_db():
         """
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
+            username TEXT UNIQUE,
             password TEXT,
             role TEXT
         )
@@ -29,44 +32,88 @@ def init_db():
     )
     cur.execute("DELETE FROM users")
     cur.execute(
-        "INSERT INTO users (username, password, role) VALUES ('admin', 'admin123', 'admin')"
+        "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+        ("admin", "admin123", "admin"),
     )
     cur.execute(
-        "INSERT INTO users (username, password, role) VALUES ('user', 'user123', 'user')"
+        "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+        ("user", "user123", "user"),
     )
     conn.commit()
     conn.close()
 
 
+@app.after_request
+def add_security_headers(response):
+    # --- CSP (корректный, без fallback-проблем) ---
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self'; "
+        "img-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'; "
+        "form-action 'self'"
+    )
+
+    # --- Anti-clickjacking / MIME sniffing / privacy ---
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+
+    # --- Site isolation headers (то, что просит ZAP по Spectre) ---
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+
+    # --- Cache control (чтобы не кешировалось “на год” прокси/браузерами) ---
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+
+    # --- Hide server version (Werkzeug/ Python versions) ---
+    # В dev-сервере Flask это лучший вариант. В проде нужно убирать через reverse-proxy (nginx) или WSGI server.
+    response.headers["Server"] = "WebServer"
+
+    return response
+
+
 @app.route("/")
 def index():
     html = """
-    <h1>Vulnerable DAST Demo App</h1>
-    <p>Пример уязвимого приложения для лабораторной по DAST.</p>
+    <h1>DAST Demo App (Secured)</h1>
     <ul>
-      <li><a href="/echo?msg=Hello">Reflected XSS / echo</a></li>
-      <li><a href="/search?username=admin">SQL Injection / search</a></li>
-      <li><a href="/login">Небезопасный логин</a></li>
-      <li><a href="/profile">Профиль (зависит от cookie)</a></li>
-      <li><a href="/admin">«Админка» без нормальной авторизации</a></li>
-      <li><a href="/files/">Directory listing</a></li>
+      <li><a href="/echo?msg=Hello">Echo (XSS fixed)</a></li>
+      <li><a href="/search?username=admin">Search (SQLi fixed)</a></li>
+      <li><a href="/login">Login</a></li>
+      <li><a href="/profile">Profile</a></li>
+      <li><a href="/admin">Admin panel</a></li>
+      <li><a href="/files/secret.txt">Files (restricted)</a></li>
     </ul>
     """
     resp = make_response(html)
-    resp.set_cookie("session", "guest-session-id")
+    resp.set_cookie(
+        "session",
+        "guest",
+        httponly=True,
+        samesite="Lax",
+    )
     return resp
 
 
 @app.route("/echo")
 def echo():
-    msg = request.args.get("msg", "")
-    template = """
-    <h2>Echo</h2>
-    <p>Сообщение: {msg}</p>
-    <p>Попробуйте передать что-нибудь вроде: <code>&lt;script&gt;alert('XSS')&lt;/script&gt;</code></p>
-    <a href="/">Назад</a>
-    """.format(msg=msg)
-    return render_template_string(template)
+    msg = escape(request.args.get("msg", ""))
+    return render_template_string(
+        """
+        <h2>Echo</h2>
+        <p>Сообщение: {{ msg }}</p>
+        <a href="/">Назад</a>
+        """,
+        msg=msg,
+    )
 
 
 @app.route("/search")
@@ -74,144 +121,109 @@ def search():
     username = request.args.get("username", "")
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    query = f"SELECT id, username, role FROM users WHERE username = '{username}'"  # nosec B608
-    rows = []
-    error = None
-    try:
-        for row in cur.execute(query):
-            rows.append(row)
-    except Exception as e:
-        error = str(e)
 
+    cur.execute("SELECT id, username, role FROM users WHERE username = ?", (username,))
+    rows = cur.fetchall()
     conn.close()
 
-    template = """
-    <h2>Поиск пользователя</h2>
-    <p>Запрос: <code>{{ query }}</code></p>
-    {% if error %}
-      <p style="color:red;">SQL error: {{ error }}</p>
-    {% endif %}
-    {% if rows %}
-      <ul>
-      {% for id, username, role in rows %}
-        <li>{{ id }} – {{ username }} ({{ role }})</li>
-      {% endfor %}
-      </ul>
-    {% else %}
-      <p>Ничего не найдено</p>
-    {% endif %}
-    <p>Попробуйте, например: <code>?username=admin' OR '1'='1</code></p>
-    <a href="/">Назад</a>
-    """
-    return render_template_string(template, query=query, rows=rows, error=error)
+    return render_template_string(
+        """
+        <h2>Поиск пользователя</h2>
+        {% if rows %}
+          <ul>
+          {% for id, username, role in rows %}
+            <li>{{ id }} – {{ username }} ({{ role }})</li>
+          {% endfor %}
+          </ul>
+        {% else %}
+          <p>Ничего не найдено</p>
+        {% endif %}
+        <a href="/">Назад</a>
+        """,
+        rows=rows,
+    )
 
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "GET":
-        form = """
-        <h2>Логин</h2>
-        <form method="post">
-          <label>Username: <input type="text" name="username"></label><br>
-          <label>Password: <input type="password" name="password"></label><br>
-          <button type="submit">Login</button>
-        </form>
-        <p>Попробуйте: admin / admin123 или user / user123</p>
-        <a href="/">Назад</a>
-        """
-        return render_template_string(form)
+        return render_template_string(
+            """
+            <h2>Login</h2>
+            <form method="post">
+              <input name="username">
+              <input name="password" type="password">
+              <button type="submit">Login</button>
+            </form>
+            """
+        )
 
     username = request.form.get("username", "")
     password = request.form.get("password", "")
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-
-    query = f"SELECT id, username, role FROM users WHERE username = '{username}' AND password = '{password}'"  # nosec B608
-    row = cur.execute(query).fetchone()
+    cur.execute(
+        "SELECT username, role FROM users WHERE username = ? AND password = ?",
+        (username, password),
+    )
+    row = cur.fetchone()
     conn.close()
 
-    if row:
-        _, uname, role = row
-        resp = make_response(
-            f"<h2>Добро пожаловать, {uname} ({role})!</h2><a href='/'>На главную</a>"
-        )
+    if not row:
+        abort(401)
 
-        resp.set_cookie("user", uname)
-        resp.set_cookie("role", role)
-        return resp
-    else:
-        return render_template_string(
-            "<h2>Неверные учетные данные</h2><a href='/login'>Попробовать снова</a>"
-        )
+    uname, role = row
+    resp = make_response(redirect(url_for("profile")))
+    resp.set_cookie("user", uname, httponly=True, samesite="Lax")
+    resp.set_cookie("role", role, httponly=True, samesite="Lax")
+    return resp
 
 
 @app.route("/profile")
 def profile():
-    username = request.cookies.get("user", "guest")
-    role = request.cookies.get("role", "guest")
-
-    template = """
-    <h2>Профиль пользователя</h2>
-    <p>Имя: {{ username }}</p>
-    <p>Роль: {{ role }}</p>
-    <p>Cookie легко подделать: можно выдать себе роль 'admin'.</p>
-    <a href="/">Назад</a>
-    """
-    return render_template_string(template, username=username, role=role)
+    return render_template_string(
+        """
+        <h2>Profile</h2>
+        <p>User: {{ user }}</p>
+        <p>Role: {{ role }}</p>
+        <a href="/">Назад</a>
+        """,
+        user=request.cookies.get("user", "guest"),
+        role=request.cookies.get("role", "guest"),
+    )
 
 
 @app.route("/admin")
 def admin():
-    role = request.cookies.get("role", "guest")
-    if role != "admin":
-        return (
-            "<h2>Доступ запрещён: вы не admin</h2><p>Попробуйте изменить cookie 'role'.</p><a href='/'>Назад</a>",
-            403,
-        )
+    if request.cookies.get("role") != "admin":
+        abort(403)
 
-    template = """
-    <h2>Admin panel</h2>
-    <p>Секретные настройки приложения (демо).</p>
-    <ul>
-      <li>DEBUG: true</li>
-      <li>FEATURE_FLAG: experimental_mode</li>
-    </ul>
-    <a href="/">Назад</a>
-    """
-    return render_template_string(template)
-
-
-@app.route("/files/")
-@app.route("/files/<path:subpath>")
-def files(subpath=""):
-    base_dir = os.path.abspath(os.path.dirname(__file__))
-    target_dir = os.path.join(base_dir, "files")
-
-    full_path = os.path.join(target_dir, subpath)
-
-    if not os.path.exists(full_path):
-        return "<h2>Путь не найден</h2><a href='/'>Назад</a>", 404
-
-    if os.path.isdir(full_path):
-        entries = os.listdir(full_path)
-        items = "".join(
-            f"<li><a href='/files/{subpath}{'' if subpath.endswith('/') or subpath == '' else '/'}{e}'>{e}</a></li>"
-            for e in entries
-        )
-        html = f"""
-        <h2>Files under /files/{subpath}</h2>
-        <ul>{items}</ul>
-        <p>Пример directory listing без ограничений.</p>
+    return render_template_string(
+        """
+        <h2>Admin panel</h2>
+        <p>Secure admin content</p>
         <a href="/">Назад</a>
         """
-        return html
+    )
 
-    with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
-        content = f.read()
-    return f"<pre>{content}</pre>"
+
+@app.route("/files/<filename>")
+def files(filename):
+    # защита от traversal
+    if "/" in filename or ".." in filename:
+        abort(403)
+
+    file_path = os.path.join(FILES_DIR, filename)
+    if not os.path.isfile(file_path):
+        abort(404)
+
+    with open(file_path, encoding="utf-8", errors="ignore") as f:
+        return f"<pre>{escape(f.read())}</pre>"
 
 
 if __name__ == "__main__":
     init_db()
-    app.run(host="0.0.0.0", port=8080, debug=True)  # nosec B201,B104
+    # debug выключен, чтобы не светить лишнее
+    app.run(host="0.0.0.0", port=8080, debug=False)
+

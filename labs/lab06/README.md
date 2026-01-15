@@ -289,33 +289,3 @@ $ rm -rf venv
 $ docker-compose -f demo-vulnerable-app.yml down
 $ docker system prune -f
 ```
- 
-***
-
-## Troobleshooting
-
-- Права для исполнения скрипта
-
-```bash
-$ chmod +x xxx.sh # разрешение прав при permission denied
-```
-
-- На macOS/AArch64 docker-bench-security может не запускаться из‑за ограничений Docker Desktop и это работает для Linux‑VM. На Mac используем Trivy‑скан и разбор конфигурации compose‑файлов.
-
-***
-
-## Links
-
-- [Docker](https://docs.docker.com/)
-- [Docker Engine security](https://docs.docker.com/engine/security/)
-- [Docker Bench for Security](https://github.com/docker/docker-bench-security)
-- [CIS Docker Benchmark](https://www.cisecurity.org/benchmark/docker)
-- [Trivy: Container Security Scanner](https://aquasecurity.github.io/trivy/)
-- [Markdown](https://stackedit.io)
-- [Gist](https://gist.github.com)
-- [GitHub Docs](https://docs.github.com/en)
-- [GitHub CLI](https://cli.github.com)
-
-Copyright (c) 2025 Elijah S Shmakov
-
-![Logo](../../assets/logotype/logo.jpg)
